@@ -107,8 +107,8 @@ def train_net(G_net,
                 D_train_loss.backward()
                 D_optimizer.step()
 
-                train_hist['D_losses'].append(D_train_loss.data[0])
-                D_losses.append(D_train_loss.data[0])
+                train_hist['D_losses'].append(D_train_loss.data)
+                D_losses.append(D_train_loss.data)
 
                 #loss = criterion(masks_pred, true_masks)
                 #epoch_loss += loss.item()
@@ -123,10 +123,10 @@ def train_net(G_net,
                 G_train_loss.backward()
                 G_optimizer.step()
 
-                train_hist['G_losses'].append(G_train_loss.data[0])
-                G_losses.append(G_train_loss.data[0])
+                train_hist['G_losses'].append(G_train_loss.data)
+                G_losses.append(G_train_loss.data)
 
-                pbar.set_postfix(**{'loss (batch)': G_train_loss.data[0].item()})
+                pbar.set_postfix(**{'loss (batch)': G_train_loss.data.item()})
                 pbar.update(imgs.shape[0])
 
                 global_step += 1
@@ -192,9 +192,9 @@ if __name__ == '__main__':
     G_net = UNet(n_channels=3, n_classes=1, bilinear=True)
     D_net = Discriminator(ndf)
     logging.info(f'Network:\n'
-                 f'\t{net.n_channels} input channels\n'
-                 f'\t{net.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
+                 f'\t{G_net.n_channels} input channels\n'
+                 f'\t{G_net.n_classes} output channels (classes)\n'
+                 f'\t{"Bilinear" if G_net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
         G_net.load_state_dict(
