@@ -11,17 +11,20 @@ from tqdm import tqdm
 
 from eval import eval_net
 from unet import UNet
+from unet import Discriminator
 
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
+from torch.autograd import Variable
 
 dir_img = 'data/imgs/'
 dir_mask = 'data/masks/'
 dir_checkpoint = 'checkpoints/'
 
 
-def train_net(net,
+def train_net(G_net,
+              D_net,
               device,
               epochs=5,
               batch_size=1,
@@ -51,73 +54,104 @@ def train_net(net,
         Images scaling:  {img_scale}
     ''')
 
-    optimizer = optim.RMSprop(net.parameters(), lr=lr, weight_decay=1e-8, momentum=0.9)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', patience=2)
-    if net.n_classes > 1:
-        criterion = nn.CrossEntropyLoss()
-    else:
-        criterion = nn.BCEWithLogitsLoss()
+    #optimizer = optim.RMSprop(net.parameters(), lr=lr, weight_decay=1e-8, momentum=0.9)
+    #scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min' if net.n_classes > 1 else 'max', patience=2)
+    
+    # if net.n_classes > 1:
+    #     criterion = nn.CrossEntropyLoss()
+    # else:
+    #     criterion = nn.BCEWithLogitsLoss()
+
+    # Adam optimizer
+    beta1 = 0.5
+    beta2 = 0.999
+    G_optimizer = optim.Adam(G_net.parameters(), lr=lr, betas=(beta1, beta2))
+    D_optimizer = optim.Adam(D_net.parameters(), lr=lr, betas=(beta1, beta2))
+
+    # loss
+    BCE_loss = nn.BCELoss().cuda()
+    L1_loss = nn.L1Loss().cuda()
+
+    G_net.train()
+    D_net.train()
+
+    train_hist = {}
+    train_hist['D_losses'] = []
+    train_hist['G_losses'] = []
 
     for epoch in range(epochs):
-        net.train()
-
-        epoch_loss = 0
+        #epoch_loss = 0
+        D_losses = []
+        G_losses = []
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 imgs = batch['image']
                 true_masks = batch['mask']
-                assert imgs.shape[1] == net.n_channels, \
-                    f'Network has been defined with {net.n_channels} input channels, ' \
+                assert imgs.shape[1] == G_net.n_channels, \
+                    f'Network has been defined with {G_net.n_channels} input channels, ' \
                     f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
 
                 imgs = imgs.to(device=device, dtype=torch.float32)
-                mask_type = torch.float32 if net.n_classes == 1 else torch.long
+                mask_type = torch.float32 if G_net.n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
 
-                masks_pred = net(imgs)
-                loss = criterion(masks_pred, true_masks)
-                epoch_loss += loss.item()
-                writer.add_scalar('Loss/train', loss.item(), global_step)
+                D_result = D_net(imgs, true_masks).squeeze()
+                D_real_loss = BCE_loss(D_result, Variable(torch.ones(D_result.size()).cuda()))
 
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                G_result  = G_net(imgs)
+                D_result = D_net(imgs, G_result).squeeze()
+                D_fake_loss = BCE_loss(D_result, Variable(torch.zeros(D_result.size()).cuda()))
 
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                optimizer.step()
+                D_train_loss = (D_real_loss + D_fake_loss) * 0.5
+                D_train_loss.backward()
+                D_optimizer.step()
 
+                train_hist['D_losses'].append(D_train_loss.data[0])
+                D_losses.append(D_train_loss.data[0])
+
+                #loss = criterion(masks_pred, true_masks)
+                #epoch_loss += loss.item()
+                #writer.add_scalar('Loss/train', loss.item(), global_step)
+
+
+                G_net.zero_grad()
+                G_result = G_net(imgs)
+                D_result = D_net(imgs, G_result).squeeze()
+
+                G_train_loss = BCE_loss(D_result, Variable(torch.ones(D_result.size()).cuda())) + 100 * L1_loss(G_result, true_masks)
+                G_train_loss.backward()
+                G_optimizer.step()
+
+                train_hist['G_losses'].append(G_train_loss.data[0])
+                G_losses.append(G_train_loss.data[0])
+
+                pbar.set_postfix(**{'loss (batch)': G_train_loss.data[0].item()})
                 pbar.update(imgs.shape[0])
+
                 global_step += 1
                 if global_step % (n_train // (10 * batch_size)) == 0:
-                    for tag, value in net.named_parameters():
+                    for tag, value in G_net.named_parameters():
                         tag = tag.replace('.', '/')
                         writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
                         writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
-                    val_score = eval_net(net, val_loader, device)
-                    scheduler.step(val_score)
-                    writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
-
-                    if net.n_classes > 1:
-                        logging.info('Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/test', val_score, global_step)
-                    else:
-                        logging.info('Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/test', val_score, global_step)
+                    val_score = eval_net(G_net, val_loader, device)
+                    #scheduler.step(val_score)
+                    #writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
 
                     writer.add_images('images', imgs, global_step)
-                    if net.n_classes == 1:
-                        writer.add_images('masks/true', true_masks, global_step)
-                        writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
-
+        print('[%d/%d] - loss_d: %.3f, loss_g: %.3f' % ((epoch + 1), epochs, torch.mean(torch.FloatTensor(D_losses)),
+                                                              torch.mean(torch.FloatTensor(G_losses))))
         if save_cp:
             try:
                 os.mkdir(dir_checkpoint)
                 logging.info('Created checkpoint directory')
             except OSError:
                 pass
-            torch.save(net.state_dict(),
+            torch.save(G_net.state_dict(),
                        dir_checkpoint + f'CP_epoch{epoch + 1}.pth')
+            torch.save(D_net.state_dict(),
+                       dir_checkpoint + f'D_epoch{epoch + 1}.pth')
             logging.info(f'Checkpoint {epoch + 1} saved !')
 
     writer.close()
@@ -154,24 +188,28 @@ if __name__ == '__main__':
     #   - For 1 class and background, use n_classes=1
     #   - For 2 classes, use n_classes=1
     #   - For N > 2 classes, use n_classes=N
-    net = UNet(n_channels=3, n_classes=1, bilinear=True)
+    ndf = 64
+    G_net = UNet(n_channels=3, n_classes=1, bilinear=True)
+    D_net = Discriminator(ndf)
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
                  f'\t{net.n_classes} output channels (classes)\n'
                  f'\t{"Bilinear" if net.bilinear else "Transposed conv"} upscaling')
 
     if args.load:
-        net.load_state_dict(
+        G_net.load_state_dict(
             torch.load(args.load, map_location=device)
         )
         logging.info(f'Model loaded from {args.load}')
 
-    net.to(device=device)
+    G_net.to(device=device)
+    D_net.to(device=device)
     # faster convolutions, but more memory
     # cudnn.benchmark = True
 
     try:
-        train_net(net=net,
+        train_net(G_net=G_net,
+                  D_net=D_net,
                   epochs=args.epochs,
                   batch_size=args.batchsize,
                   lr=args.lr,
@@ -179,7 +217,7 @@ if __name__ == '__main__':
                   img_scale=args.scale,
                   val_percent=args.val / 100)
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pth')
+        torch.save(G_net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
         try:
             sys.exit(0)
