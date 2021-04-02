@@ -87,20 +87,27 @@ def train_net(G_net,
             for batch in train_loader:
                 imgs = batch['image']
                 true_masks = batch['mask']
+                
                 assert imgs.shape[1] == G_net.n_channels, \
                     f'Network has been defined with {G_net.n_channels} input channels, ' \
                     f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
+                
 
                 imgs = imgs.to(device=device, dtype=torch.float32)
                 mask_type = torch.float32 if G_net.n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
+                
+                # Discriminator 학습
+                D_net.zero_grad()
 
                 D_result = D_net(imgs, true_masks).squeeze()
                 D_real_loss = BCE_loss(D_result, Variable(torch.ones(D_result.size()).cuda()))
 
                 G_result  = G_net(imgs)
-                D_result = D_net(imgs, G_result).squeeze()
+                D_result = D_net(imgs, G_result.detach()).squeeze()
+                # torch.Size([16, 1, 14, 14])
+                #  D_result = torch.Size([16, 14, 14])
                 D_fake_loss = BCE_loss(D_result, Variable(torch.zeros(D_result.size()).cuda()))
 
                 D_train_loss = (D_real_loss + D_fake_loss) * 0.5
@@ -109,12 +116,8 @@ def train_net(G_net,
 
                 train_hist['D_losses'].append(D_train_loss.data)
                 D_losses.append(D_train_loss.data)
-
-                #loss = criterion(masks_pred, true_masks)
-                #epoch_loss += loss.item()
-                #writer.add_scalar('Loss/train', loss.item(), global_step)
-
-
+                
+                # Generator 학습
                 G_net.zero_grad()
                 G_result = G_net(imgs)
                 D_result = D_net(imgs, G_result).squeeze()
